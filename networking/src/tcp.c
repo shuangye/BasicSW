@@ -21,8 +21,8 @@ typedef struct NET_Node {
 
 
 typedef struct NET_MessageHeader {
-    Int32       messageType;
-    Uint32      messageLength;
+    Int32       type;
+    Uint32      length;
 } NET_MessageHeader;
 
 
@@ -94,6 +94,100 @@ int NET_deinit(NET_Handle handle)
 }
 
 
+int NET_tcpSend(NET_Handle handle, const char *data, const size_t length)
+{
+    int ret = OSA_STATUS_OK;
+    NET_Node *node;
+    NET_MessageHeader header;
+    char *p;
+    size_t sentSize;    
+
+
+    node = (NET_Node *)handle;
+    if (NULL == node || NULL == data) {
+        OSA_error("Invalid parameter.\n");
+        return OSA_STATUS_EINVAL;
+    }
+
+    header.type = 1;
+    header.length = length;
+    ret = send(node->sd, &header, sizeof(header), 0);
+    if (ret < sizeof(header)) {
+        ret = errno;
+        OSA_error("Sending header failed with %d.\n", ret);
+        return ret;
+    }
+
+    for (sentSize = 0, p = (char*)data; sentSize < length; sentSize += ret, p += ret) {
+       ret = send(node->sd, p, length - sentSize, 0);
+       if (ret < 0) {
+           OSA_error("Sending failed with %d.\n", errno);
+           ret = errno;
+           break;
+       }
+       OSA_debug("Sent %d bytes.\n", ret);
+   }
+
+   if (length == sentSize) {
+       ret = OSA_STATUS_OK;
+   }
+
+   return ret;
+}
+
+
+int NET_tcpRecv(int sd, char *buffer, size_t *pLength)
+{
+    int ret = OSA_STATUS_OK;    
+    NET_MessageHeader header;
+    char *p;
+    size_t receivedSize;    
+
+
+    if (NULL == buffer || NULL == pLength) {
+        OSA_error("Invalid parameter.\n");
+        return OSA_STATUS_EINVAL;
+    }
+
+    /* receive the header */
+    bzero(&header, sizeof(header));
+    ret = recv(sd, &header, sizeof(header), 0);
+    if (ret < sizeof(header)) {
+        OSA_error("No header received.\n");
+        return -1;
+    }
+
+    OSA_debug("Received %d bytes header.\n", ret);
+
+    /* parse the header */
+    if (header.length > *pLength) {
+        OSA_error("Message length %lu if greater than the buffer supplied %lu.\n", 
+            header.length, *pLength);
+        return OSA_STATUS_EINVAL;
+    }
+
+    /* then receive the body */
+    for (receivedSize = 0, p = buffer; receivedSize < header.length; receivedSize += ret, p += ret) {
+        ret = recv(sd, p, header.length - receivedSize, 0);
+        if (ret < 0) {
+            ret = errno;
+            OSA_error("Receiving failed with %d.\n", ret);
+            break;
+        }
+        
+    }
+
+    OSA_debug("Received %lu bytes body.\n", receivedSize);
+
+    if (receivedSize == header.length) {
+        ret = OSA_STATUS_OK;
+    }
+
+    pLength = receivedSize;
+    return ret;
+}
+
+
 int NET_tcpServer(NET_Handle handle)
 { 
     /*
@@ -102,12 +196,9 @@ int NET_tcpServer(NET_Handle handle)
 
     int ret;
     NET_Node *node = (NET_Node *)handle;
-    NET_MessageHeader *pMessageHeader;
     char *buffer;
-    char *p;
-    size_t messageSize;                               /* header + body */
-    size_t receivedSize;
     const size_t bufferSize = 8 * (1 << 20);          /* 8MB */
+    size_t messageLength;
     const int kMaxConnectionCount = 16;
     int connectionSd;                                 /* connection with a client */
     struct sockaddr_in clientSocketAddr;              /* where the connection comes from */
@@ -145,37 +236,15 @@ int NET_tcpServer(NET_Handle handle)
             continue;
         }
         
-        /* receive a part */
-        bzero(buffer, bufferSize);
-        ret = recv(connectionSd, buffer, bufferSize, 0);
-        if (ret < sizeof(*pMessageHeader)) {
-            OSA_error("No header received.\n");
+        messageLength = bufferSize;
+        ret = NET_tcpRecv(connectionSd, buffer, &messageLength);
+        if (OSA_isFailed(ret)) {
+            OSA_error("Receiving failed with %d.\n", ret);
             continue;
         }
 
-        /* parse the header */
-        pMessageHeader = (NET_MessageHeader *)buffer;
-        if (pMessageHeader->messageLength > bufferSize) {
-            OSA_error("Message too long: %#x bytes.\n", pMessageHeader->messageLength);
-            continue;
-        }
-
-        messageSize = sizeof(*pMessageHeader) + pMessageHeader->messageLength;
-
-        /* then receive the reset part (if any) */
-        for (receivedSize = ret, p = buffer + ret; 
-             receivedSize < messageSize; 
-             receivedSize += ret, p += ret) {
-            ret = recv(connectionSd, p, messageSize - receivedSize, 0);
-            if (ret < 0) {
-                OSA_error("Server receiving buffer failed with %d.\n", errno);
-                break;
-            }
-            OSA_info("Got buffer of size %d from client %s:%hu\n", 
-               ret, inet_ntoa(clientSocketAddr.sin_addr), ntohs(clientSocketAddr.sin_port));
-        }
-
-        OSA_info("Received %u bytes from client: %s.\n", receivedSize, buffer + sizeof(*pMessageHeader));
+        OSA_info("Received %lu bytes from client %s:%hu\n", 
+            messageLength, inet_ntoa(clientSocketAddr.sin_addr), ntohs(clientSocketAddr.sin_port));
         
         bzero(buffer, bufferSize);
         sprintf(buffer, "Got your message.\n");
@@ -200,14 +269,11 @@ int NET_tcpClient(NET_Handle handle, const char *remoteIpAddr, const int remoteP
 
     int ret;
     NET_Node *node = (NET_Node *)handle;
-    struct sockaddr_in serverSocketAddr;              /* where are you going to connect */
-    NET_MessageHeader *pMessageHeader;    
-    char *buffer;
-    char *p;
+    struct sockaddr_in serverSocketAddr;              /* where are you going to connect */    
+    char *buffer;    
     const size_t bufferSize = 8 * (1 << 20);          /* 8MB */
-    size_t messageSize;                               /* header + body */
-    size_t sentSize = 0;
     
+
     if (NULL == node || NULL == remoteIpAddr) {
         OSA_error("Invalid parameter.\n");
         return OSA_STATUS_EINVAL;
@@ -238,30 +304,12 @@ int NET_tcpClient(NET_Handle handle, const char *remoteIpAddr, const int remoteP
     }
 
     bzero(buffer, bufferSize);
-
-    /* construct the header */
-    pMessageHeader = (NET_MessageHeader *)buffer;
-    pMessageHeader->messageType = 1;
-    pMessageHeader->messageLength = bufferSize - sizeof(*pMessageHeader);
-    
-    /* fill message body */
-    sprintf(buffer + sizeof(*pMessageHeader), "Hi guy, are you there?");
-
-    messageSize = sizeof(*pMessageHeader) + pMessageHeader->messageLength;
-
-    for (sentSize = 0, p = buffer; 
-         sentSize < messageSize; 
-         sentSize += ret, p += ret) {
-        ret = send(node->sd, p, messageSize - sentSize, 0);
-        if (ret < 0) {
-            OSA_error("Sending to server failed with %d.\n", errno);
-            ret = errno;
-            goto _return;
-        }
-        OSA_info("Sent %d bytes to server.\n", ret);
+    sprintf(buffer, "Hi guy, are you there?");
+    ret = NET_tcpSend(handle, buffer, bufferSize);
+    if (OSA_isFailed(ret)) {
+        OSA_error("Sending failed with %d.\n", ret);
+        goto _return;
     }
-
-    OSA_info("All buffer sent to server.\n");
 
     bzero(buffer, bufferSize);
     ret = recv(node->sd, buffer, bufferSize, 0);
