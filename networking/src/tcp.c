@@ -96,7 +96,10 @@ int NET_tcpServer(NET_Handle handle)
 
     int ret;
     NET_Node *node = (NET_Node *)handle;
-    char buffer[1024];
+    char *buffer;
+    char *p;
+    size_t receivedSize;
+    const size_t bufferSize = 8 * (1 << 20);          /* 8MB */
     const int kMaxConnectionCount = 16;
     int connectionSd;                                 /* connection with a client */
     struct sockaddr_in clientSocketAddr;              /* where the connection comes from */
@@ -116,6 +119,12 @@ int NET_tcpServer(NET_Handle handle)
 
     OSA_info("Server listening on port %d...\n", node->port);
 
+    buffer = malloc(bufferSize);
+    if (NULL == buffer) {
+        OSA_error("Failed to allocate memory for storage of reception.\n");
+        return OSA_STATUS_ENOMEM;
+    }
+
     while (1) { 
         //接受一个到server_socket代表的socket的一个连接
         //如果没有连接请求,就等待到有连接请求--这是accept函数的特性
@@ -128,15 +137,16 @@ int NET_tcpServer(NET_Handle handle)
             continue;
         }
         
-        bzero(buffer, sizeof(buffer));
-        ret = recv(connectionSd, buffer, sizeof(buffer), 0);
-        if (ret < 0) {
-            OSA_error("Server receiving data failed with %d.\n", errno);
-            continue;
-        }
-
-        OSA_info("Got message from client %s:%hu = %s\n", 
-            inet_ntoa(clientSocketAddr.sin_addr), ntohs(clientSocketAddr.sin_port), buffer);
+        bzero(buffer, bufferSize);
+        for (receivedSize = 0, p = buffer; receivedSize < bufferSize; receivedSize += ret, p += ret) {
+            ret = recv(connectionSd, p, bufferSize - receivedSize, 0);
+            if (ret < 0) {
+                OSA_error("Server receiving data failed with %d.\n", errno);
+                break;
+            }
+            OSA_info("Got data of size %d from client %s:%hu\n", 
+               ret, inet_ntoa(clientSocketAddr.sin_addr), ntohs(clientSocketAddr.sin_port));
+        }       
         
         sprintf(buffer, "Got your message.\n");
         ret = send(connectionSd, buffer, sizeof(buffer), 0);
@@ -146,7 +156,8 @@ int NET_tcpServer(NET_Handle handle)
 
         close(connectionSd);
     }
-    
+
+    free(buffer);    
     return OSA_STATUS_OK;
 }
 
@@ -160,11 +171,20 @@ int NET_tcpClient(NET_Handle handle, const char *remoteIpAddr, const int remoteP
     int ret;
     NET_Node *node = (NET_Node *)handle;
     struct sockaddr_in serverSocketAddr;    /* where are you going to connect */
-    char buffer[1024];
+    char *data;
+    char *p;
+    const size_t dataSize = 8 * (1 << 20);          /* 8MB */
+    size_t sentDataSize = 0;
     
     if (NULL == node || NULL == remoteIpAddr) {
         OSA_error("Invalid parameter.\n");
         return OSA_STATUS_EINVAL;
+    }
+
+    data = malloc(dataSize);
+    if (NULL == data) {
+        OSA_error("Failed to allocate memory for data.\n");
+        return OSA_STATUS_ENOMEM;
     }
     
     bzero(&serverSocketAddr,sizeof(serverSocketAddr));
@@ -174,32 +194,44 @@ int NET_tcpClient(NET_Handle handle, const char *remoteIpAddr, const int remoteP
     ret = inet_aton(remoteIpAddr, &serverSocketAddr.sin_addr);
     if (0 == ret) {
         OSA_error("Invalid remote IP address %s.\n", remoteIpAddr);
-        return OSA_STATUS_EINVAL;
+        ret = OSA_STATUS_EINVAL;
+        goto _return;
     }
 
     ret = connect(node->sd, (const struct sockaddr *)&serverSocketAddr, sizeof(serverSocketAddr));
     if (0 != ret) {
         OSA_error("Connecting to server %s:%d failed with %d.\n", remoteIpAddr, remotePort, errno);
-        return errno;
+        ret = errno;
+        goto _return;
     }
 
-    sprintf(buffer, "Hi guy, are you there?\n");
-    ret = send(node->sd, buffer, sizeof(buffer), 0);
-    if (ret < 0) {
-        OSA_error("Sending to server failed with %d.\n", errno);
-        return errno;
+    /* data is not initialized */
+    for (sentDataSize = 0, p = data; sentDataSize < dataSize; sentDataSize += ret, p += ret) {
+        ret = send(node->sd, p, dataSize - sentDataSize, 0);
+        if (ret < 0) {
+            OSA_error("Sending to server failed with %d.\n", errno);
+            ret = errno;
+            goto _return;
+        }
+        OSA_info("Sent %d bytes to server.\n", ret);
     }
 
-    bzero(buffer, sizeof(buffer));
-    ret = recv(node->sd, buffer, sizeof(buffer), 0);
+    OSA_info("All data sent to server.\n");
+
+    bzero(data, dataSize);
+    ret = recv(node->sd, data, dataSize, 0);
     if (ret < 0) {
         OSA_error("Receiving from server failed with %d.\n", errno);
-        return errno;
+        ret = errno;
+        goto _return;
     }
 
-    OSA_info("Got server response = %s\n", buffer);
+    OSA_info("Got server response = %s\n", data);
+    ret = OSA_STATUS_OK;
     
-    return OSA_STATUS_OK;
+_return:
+    free(data);
+    return ret;
 }
 
 
