@@ -1,11 +1,11 @@
 #include "tcp.h"
-#include <netinet/in.h>    // for sockaddr_in
-#include <sys/types.h>     // for socket
-#include <sys/socket.h>    // for socket
+#include <netinet/in.h>    /* for sockaddr_in */
+#include <sys/types.h>     /* for socket */
+#include <sys/socket.h>    /* for socket */
 #include <arpa/inet.h>
 #include <stdio.h>         
 #include <stdlib.h>        
-#include <string.h>        // for bzero
+#include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -22,7 +22,7 @@ typedef struct NET_Node {
 
 typedef struct NET_MessageHeader {
     Int32       type;
-    Uint32      length;
+    Uint32      length;    /* body length */
 } NET_MessageHeader;
 
 
@@ -148,6 +148,8 @@ int NET_tcpRecv(int sd, char *buffer, size_t *pLength)
         OSA_error("Invalid parameter.\n");
         return OSA_STATUS_EINVAL;
     }
+    
+    /* CAUTION: What if the header and body misorders? */
 
     /* receive the header */
     bzero(&header, sizeof(header));
